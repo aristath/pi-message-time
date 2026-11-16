@@ -1,7 +1,6 @@
-import { addGuide, createProjector, formatter, SUMMARY_GUIDE } from './timestamps.js';
+import { projectMessages, formatter } from './timestamps.js';
 
 export default function messageTime(pi) {
-  const project = createProjector();
   let current = formatter(), selectedZone, warning;
   function configuration(ctx) {
     try {
@@ -19,30 +18,12 @@ export default function messageTime(pi) {
     }
     return current;
   }
-  pi.on('context_with_system', (event, ctx) => ({ messages: addGuide(project(event.messages, configuration(ctx))) }));
-  pi.on('session_before_compact', (event, ctx) => {
-    const format = configuration(ctx), preparation = event.preparation;
-    const summarize = messages => {
-      const stamped = project(messages, format);
-      const index = stamped.findIndex((message, i) => message !== messages[i]);
-      if (index < 0) return stamped;
-      const message = stamped[index], note = `<message_time_guidance>${SUMMARY_GUIDE}</message_time_guidance>\n`;
-      if (typeof message.content === 'string') stamped[index] = { ...message, content: note + message.content };
-      else {
-        let at = 0;
-        while (message.content[at]?.type === 'thinking') at++;
-        stamped[index] = { ...message, content: [...message.content.slice(0, at), { type: 'text', text: note }, ...message.content.slice(at)] };
-      }
-      return stamped;
-    };
-    preparation.messagesToSummarize = summarize(preparation.messagesToSummarize);
-    preparation.turnPrefixMessages = summarize(preparation.turnPrefixMessages);
-  });
+  pi.on('context_with_system', (event, ctx) => ({ messages: projectMessages(event.messages, configuration(ctx)) }));
   pi.registerCommand('message-time', {
-    description: 'Show the timezone used for inline model-facing message timestamps',
+    description: 'Show the timezone used for user-message time metadata',
     handler: async (_args, ctx) => {
       const format = configuration(ctx);
-      ctx.ui.notify(`Message timestamps: ${format.resolvedOptions().timeZone}. Configure messageTime.timeZone in Pi settings. Headers are sent to the model; saved messages and the visible transcript remain unchanged.`, 'info');
+      ctx.ui.notify(`Message timestamps: ${format.resolvedOptions().timeZone}. Configure messageTime.timeZone in Pi settings. Separate metadata messages precede user messages in model requests. Saved messages and the visible transcript remain unchanged.`, 'info');
     },
   });
 }

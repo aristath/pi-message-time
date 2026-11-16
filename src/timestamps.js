@@ -1,11 +1,9 @@
-export const SECTION = 'pi_message_time';
-export const GUIDE = 'A leading <message_time> header is runtime metadata recording when that user or assistant message was created. It is not authored text or a live clock. Use its date and UTC offset to interpret temporal references. Do not emit these headers in your replies.';
-export const SUMMARY_GUIDE = GUIDE + ' Preserve dates needed to interpret relative expressions such as yesterday or tomorrow; do not reinterpret them using the date this summary is generated.';
+export const CUSTOM_TYPE = 'pi-message-time:metadata';
 
 export function formatter(timeZone) {
   return new Intl.DateTimeFormat('en-US', {
     timeZone, calendar: 'iso8601', numberingSystem: 'latn', hourCycle: 'h23',
-    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'longOffset', era: 'short',
+    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit',
   });
 }
 function timestamp(value) {
@@ -18,43 +16,20 @@ export function formatTime(value, format) {
   const milliseconds = timestamp(value);
   if (!Number.isFinite(milliseconds) || Math.abs(milliseconds) > 8640000000000000) return null;
   const parts = Object.fromEntries(format.formatToParts(new Date(milliseconds)).map(part => [part.type, part.value]));
-  const year = parts.era === 'BC' ? 1 - Number(parts.year) : Number(parts.year);
-  const yearText = year >= 0 && year <= 9999 ? String(year).padStart(4, '0') : (year < 0 ? '-' : '+') + String(Math.abs(year)).padStart(6, '0');
-  const offset = parts.timeZoneName === 'GMT' ? '+00:00' : parts.timeZoneName.replace(/^GMT/, '');
-  return `${yearText}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${offset}`;
+  return `${parts.weekday}, ${parts.month} ${parts.day}, ${parts.year}, ${parts.hour}:${parts.minute}`;
 }
 
-// Unwrap only our own projections. Literal tags in authored text are preserved.
-export function createProjector() {
-  const originals = new WeakMap();
-  function message(input, format) {
-    if (!input || typeof input !== 'object') return input;
-    const original = originals.get(input) ?? input;
-    if (!['user', 'assistant'].includes(original.role)) return input;
-    if (original.role === 'assistant' && ['aborted', 'error'].includes(original.stopReason)) return input;
-    const text = formatTime(original.timestamp, format);
-    if (!text) return input;
-    const header = `<message_time>${text}</message_time>\n`;
-    let content;
-    if (typeof original.content === 'string') {
-      if (original.role === 'assistant' && !original.content.trim()) return input;
-      content = header + original.content;
-    } else if (Array.isArray(original.content)) {
-      if (original.role === 'assistant' && !original.content.some(block => block?.type === 'toolCall' || block?.type === 'text' && block.text?.trim())) return input;
-      // Signed thinking blocks must stay in their leading positions.
-      let index = 0;
-      if (original.role === 'assistant') while (original.content[index]?.type === 'thinking') index++;
-      content = [...original.content.slice(0, index), { type: 'text', text: header }, ...original.content.slice(index)];
-    } else return input;
-    const projected = { ...original, content };
-    originals.set(projected, original);
-    return projected;
-  }
-  return (messages, format) => messages.map(input => message(input, format));
-}
-
-export function addGuide(messages) {
-  if (messages[0]?.role !== 'system') return messages;
-  const [first, ...tail] = messages;
-  return [{ ...first, sections: { ...first.sections, [SECTION]: GUIDE } }, ...tail];
+// Request-only projection. Rebuilding our own notes avoids duplicates without
+// inspecting or changing text written by either participant.
+export function projectMessages(messages, format) {
+  return messages.filter(message => message?.role !== 'custom' || message.customType !== CUSTOM_TYPE).flatMap(message => {
+    if (message?.role !== 'user' || !(typeof message.content === 'string' || Array.isArray(message.content))) return [message];
+    const time = formatTime(message.timestamp, format);
+    if (!time) return [message];
+    return [{
+      role: 'custom', customType: CUSTOM_TYPE, display: false,
+      timestamp: timestamp(message.timestamp),
+      content: `System metadata: Message creation time is ${time}`,
+    }, message];
+  });
 }
