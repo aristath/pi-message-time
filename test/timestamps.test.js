@@ -1,0 +1,61 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import extension from '../src/index.js';
+import { addGuide, createProjector, formatter, formatTime, GUIDE, SECTION } from '../src/timestamps.js';
+
+const stamp = Date.parse('2026-06-01T09:30:00Z');
+test('timestamps use the message date for DST, fractional offsets and local date boundaries', () => {
+  assert.equal(formatTime(stamp, formatter('UTC')), '2026-06-01T09:30:00+00:00');
+  const ny = formatter('America/New_York');
+  assert.equal(formatTime('2026-03-08T06:59:00Z', ny), '2026-03-08T01:59:00-05:00');
+  assert.equal(formatTime('2026-03-08T07:00:00Z', ny), '2026-03-08T03:00:00-04:00');
+  assert.equal(formatTime('2026-01-01T00:15:00Z', ny), '2025-12-31T19:15:00-05:00');
+  assert.equal(formatTime(String(stamp), formatter('Asia/Kathmandu')), '2026-06-01T15:15:00+05:45');
+  for (const bad of [undefined, null, '', 'not-a-date', Infinity]) assert.equal(formatTime(bad, ny), null);
+});
+test('projection preserves authored lookalikes and attachments without mutating or duplicating historical headers', () => {
+  const project = createProjector(), format = formatter('UTC');
+  const original = [{ role: 'user', timestamp: stamp, content: [{ type: 'text', text: '<message_time>Authored example</message_time>\nHello' }, { type: 'image', mimeType: 'image/png', data: 'synthetic-image' }] }];
+  const saved = structuredClone(original), first = project(original, format);
+  assert.deepEqual(original, saved); assert.equal(first[0].content.length, 3);
+  assert.equal(first[0].content[1], original[0].content[0]); assert.equal(first[0].content[2], original[0].content[1]);
+  assert.match(first[0].content[0].text, /2026-06-01T09:30:00\+00:00/);
+  assert.deepEqual(project(first, format), first);
+  const grown = project([...original, { role: 'user', timestamp: stamp + 60000, content: 'Later' }], format);
+  assert.deepEqual(grown[0], first[0]);
+  const changed = project(first, formatter('America/New_York'));
+  assert.match(changed[0].content[0].text, /05:30:00-04:00/); assert.equal(changed[0].content.length, 3);
+});
+test('signed reasoning and tool relationships stay intact; unusable records do not disable healthy messages', () => {
+  const project = createProjector(), format = formatter('UTC');
+  const thought = { type: 'thinking', thinking: 'Reasoning', thinkingSignature: 'opaque-signature' };
+  const call = { type: 'toolCall', id: 'call-1', name: 'fixture_read', arguments: { path: 'fiction.txt' } };
+  const assistant = { role: 'assistant', timestamp: stamp, content: [thought, call], stopReason: 'toolUse' };
+  const result = { role: 'toolResult', timestamp: stamp + 1000, toolCallId: call.id, toolName: call.name, content: [{ type: 'text', text: 'Fictional result' }] };
+  const bad = { role: 'user', timestamp: null, content: 'Undated' };
+  const custom = { role: 'custom', customType: 'fixture', timestamp: stamp, content: 'Extension observation' };
+  const empty = { role: 'assistant', timestamp: stamp, content: [] };
+  const failed = { ...assistant, stopReason: 'error' };
+  const projected = project([assistant, result, bad, custom, empty, failed], format);
+  assert.equal(projected[0].content[0], thought); assert.equal(projected[0].content[2], call);
+  for (let i = 1; i < projected.length; i++) assert.equal(projected[i], [result, bad, custom, empty, failed][i-1]);
+  const system = { role: 'system', content: 'Original prompt', sections: { fixture: 'Existing section' }, toolsAdded: [{ name: 'fixture' }], timestamp: 0 };
+  const guided = addGuide([system, ...projected]);
+  assert.equal(guided[0].content, system.content); assert.equal(guided[0].toolsAdded, system.toolsAdded);
+  assert.equal(guided[0].sections.fixture, 'Existing section'); assert.equal(guided[0].sections[SECTION], GUIDE);
+  assert.equal(system.sections[SECTION], undefined);
+});
+test('configuration failures retain the last valid timezone, warn once and recover', async () => {
+  const handlers = new Map(), commands = new Map(), notices = [];
+  let settings = { messageTime: { timeZone: 'UTC' } };
+  extension({ getSettings: () => settings, on: (name, fn) => handlers.set(name, fn), registerCommand: (name, command) => commands.set(name, command) });
+  const ctx = { ui: { notify: (...args) => notices.push(args) } };
+  const messages = [{ role: 'system', content: 'Prompt', timestamp: 0 }, { role: 'user', content: 'Hello', timestamp: stamp }];
+  const run = () => handlers.get('context_with_system')({ messages }, ctx).messages;
+  assert.match(run()[1].content, /09:30:00\+00:00/);
+  settings = { messageTime: { timeZone: ' Not/A_Zone ' } };
+  assert.match(run()[1].content, /09:30:00\+00:00/); run(); assert.equal(notices.length, 1);
+  settings = { messageTime: { timeZone: ' America/New_York ' } };
+  assert.match(run()[1].content, /05:30:00-04:00/);
+  await commands.get('message-time').handler('', ctx); assert.match(notices.at(-1)[0], /America\/New_York/);
+});
